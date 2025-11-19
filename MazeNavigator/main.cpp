@@ -25,8 +25,8 @@ vec3 cameraPos = vec3(0, 0, 0);
 vec3 viewDirection = vec3(0, 0, -1);
 vec3 goalPos = vec3(0, 0, 0);
 
-float cameraYaw = 0.0f;		// Y축 기준 회전각 (라디안)
-float rotateSpeed = 3.0f;	// 회전 속도 (라디안/초)
+float cameraYaw = 0.0f;		
+float rotateSpeed = 3.0f;	
 
 int MazeSize;
 char maze[255][255] = { 0 };
@@ -114,14 +114,13 @@ void DrawGrid()
 
 void drawCamera()
 {
-
-	mat4 ModelMat = Translate(cameraPos) * Scale(vec3(cameraSize));
+	mat4 ModelMat = Translate(cameraPos) * RotateY(-cameraYaw * 180 / 3.141592) * Scale(vec3(cameraSize));
 	glUseProgram(program);
 	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
 	glUniform4f(uColor, 0, 1, 0, 1);
 	cube.Draw(program);
 
-	ModelMat = Translate(cameraPos + viewDirection * cameraSize / 2) * Scale(vec3(cameraSize / 2));
+	ModelMat = Translate(cameraPos + viewDirection * cameraSize / 2) * RotateY(-cameraYaw * 180 / 3.141592) * Scale(vec3(cameraSize / 2));
 	glUseProgram(program);
 	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
 	glUniform4f(uColor, 0, 1, 0, 1);
@@ -133,12 +132,12 @@ void drawGoal()
 	glUseProgram(program);
 	float GoalSize = 0.7;
 
-	mat4 ModelMat = Translate(goalPos) * RotateY(g_time * 3) * Scale(vec3(GoalSize));
+	mat4 ModelMat = Translate(goalPos) * RotateY(g_time * 180) * Scale(vec3(GoalSize));
 	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
 	glUniform4f(uColor, 0, 0, 0, 0);
 	cube.Draw(program);
 
-	ModelMat = Translate(goalPos) * RotateY(g_time * 3 + 45) * Scale(vec3(GoalSize));
+	ModelMat = Translate(goalPos) * RotateY(g_time * 180 + 45) * Scale(vec3(GoalSize));
 	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
 	glUniform4f(uColor, 0, 0, 0, 0);
 	cube.Draw(program);
@@ -206,15 +205,15 @@ bool CheckCollision()
 
 void idle()
 {
-	float dt = 0.016;
+	float dt = 0.016f;
 	g_time += dt;
 
 	if ((GetAsyncKeyState('A') & 0x8000) == 0x8000)		// 왼쪽으로 회전
 		cameraYaw -= rotateSpeed * dt;
 	if ((GetAsyncKeyState('D') & 0x8000) == 0x8000)		// 오른쪽으로 회전
 		cameraYaw += rotateSpeed * dt;
-	// yaw로부터 viewDirection 갱신 (z-축을 기준으로 앞으로)
 	viewDirection = normalize(vec3(sinf(cameraYaw), 0.0f, -cosf(cameraYaw)));
+
 	if ((GetAsyncKeyState('W') & 0x8000) == 0x8000) {	// 카메라 보는 방향으로 이동
 		vec3 tryPos = cameraPos + cameraSpeed * dt * viewDirection;
 		cameraPos = tryPos;
