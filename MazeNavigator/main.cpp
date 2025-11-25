@@ -17,159 +17,250 @@ using std::priority_queue;
 #include <algorithm>
 #include <cmath>
 
-#define MAZE_FILE	"maze.txt"
+// ============================================================================
+// Constants
+// ============================================================================
+#define MAZE_FILE "maze.txt"
 
+const float DEFAULT_WINDOW_WIDTH = 1000.0f;
+const float DEFAULT_WINDOW_HEIGHT = 500.0f;
+const int MAX_MAZE_SIZE = 255;
+const int FRAME_DELAY_MS = 16;  // ~60 FPS
+const float FIXED_DELTA_TIME = 0.016f;
+const float DEFAULT_CAMERA_SPEED = 6.0f;
+const float DEFAULT_CAMERA_SIZE = 0.5f;
+const float DEFAULT_ROTATE_SPEED = 3.0f;
+const float GOAL_SIZE = 0.7f;
+const float PI = 3.141592f;
+const float GRID_LINE_COUNT = 40.0f;
+const int PATHFINDING_INFINITY = 1000000000;
+
+// ============================================================================
+// Structures
+// ============================================================================
+struct Camera {
+	vec3 position;
+	vec3 viewDirection;
+	float yaw;
+	float speed;
+	float size;
+
+	Camera()
+		: position(0, 0, 0)
+		, viewDirection(0, 0, -1)
+		, yaw(0.0f)
+		, speed(DEFAULT_CAMERA_SPEED)
+		, size(DEFAULT_CAMERA_SIZE)
+	{}
+};
+
+struct MazeData {
+	int size;
+	char cells[MAX_MAZE_SIZE][MAX_MAZE_SIZE];
+	vec3 goalPosition;
+	int goalIndexI;
+	int goalIndexJ;
+
+	MazeData()
+		: size(0)
+		, goalPosition(0, 0, 0)
+		, goalIndexI(0)
+		, goalIndexJ(0)
+	{
+		memset(cells, 0, sizeof(cells));
+	}
+};
+
+struct PathfindingState {
+	bool isFollowingPath;
+	int currentIndex;
+	int movementState;  // 0 = rotating, 1 = moving
+	vector<pair<int, int>> pathCells;
+
+	PathfindingState()
+		: isFollowingPath(false)
+		, currentIndex(0)
+		, movementState(0)
+	{}
+};
+
+// ============================================================================
+// Global Variables
+// ============================================================================
 MyCube cube;
 GLuint program;
-
 mat4 g_Mat = mat4(1.0f);
 GLuint uMat;
 GLuint uColor;
 
-float wWidth = 1000;
-float wHeight = 500;
+float wWidth = DEFAULT_WINDOW_WIDTH;
+float wHeight = DEFAULT_WINDOW_HEIGHT;
+float rotateSpeed = DEFAULT_ROTATE_SPEED;
+float g_time = 0.0f;
 
-vec3 cameraPos = vec3(0, 0, 0);
-vec3 viewDirection = vec3(0, 0, -1);
-vec3 goalPos = vec3(0, 0, 0);
+Camera g_camera;
+MazeData g_maze;
+PathfindingState g_pathState;
+bool bDrawTrace = false;
 
-float cameraYaw = 0.0f;		
-float rotateSpeed = 3.0f;	
-
-int MazeSize;
-char maze[255][255] = { 0 };
-
-float cameraSpeed = 6.0f;
-float cameraSize = 0.5;
-
-float g_time = 0;
-
-int goalindexI = 0;
-int goalindexJ = 0;
-
-vector<pair<int, int>> g_pathCells;
-
-inline vec3 getPositionFromIndex(int i, int j)
-{
-	float unit = 1;
-	vec3 leftTopPosition = vec3(-MazeSize / 2.0 + unit / 2, 0, -MazeSize / 2.0 + unit / 2);
+// ============================================================================
+// Utility Functions
+// ============================================================================
+inline vec3 GetPositionFromIndex(int i, int j) {
+	const float unit = 1.0f;
+	vec3 leftTopPosition = vec3(
+		-g_maze.size / 2.0f + unit / 2.0f,
+		0.0f,
+		-g_maze.size / 2.0f + unit / 2.0f
+	);
 	vec3 xDir = vec3(1, 0, 0);
 	vec3 zDir = vec3(0, 0, 1);
 	return leftTopPosition + i * xDir + j * zDir;
 }
 
-void LoadMaze()
-{
+bool WorldPosToIndex(const vec3& pos, int& outI, int& outJ) {
+	const float unit = 1.0f;
+	const float left = -g_maze.size / 2.0f + unit / 2.0f;
+
+	float fx = (pos.x - left) / unit;
+	float fz = (pos.z - left) / unit;
+
+	int i = (int)roundf(fx);
+	int j = (int)roundf(fz);
+
+	if (i < 0 || i >= g_maze.size || j < 0 || j >= g_maze.size)
+		return false;
+
+	outI = i;
+	outJ = j;
+	return true;
+}
+
+bool IsWallAtWorldPos(const vec3& pos) {
+	int i, j;
+	if (!WorldPosToIndex(pos, i, j))
+		return true;
+
+	return (g_maze.cells[i][j] == '*');
+}
+
+inline int CalculateHeuristic(int i, int j) {
+	return abs(i - g_maze.goalIndexI) + abs(j - g_maze.goalIndexJ);
+}
+
+// ============================================================================
+// Maze Loading
+// ============================================================================
+void LoadMaze() {
 	FILE* file = fopen(MAZE_FILE, "r");
-	char buf[255];
-	fgets(buf, 255, file);
-	sscanf(buf, "%d", &MazeSize);
-	for (int j = 0; j < MazeSize; j++)
-	{
-		fgets(buf, 255, file);
-		for (int i = 0; i < MazeSize; i++)
-		{
-			maze[i][j] = buf[i];
-			if (maze[i][j] == 'C')				// Setup Camera Position
-				cameraPos = getPositionFromIndex(i, j);
-			if (maze[i][j] == 'G') {			// Setup Goal Position
-				goalPos = getPositionFromIndex(i, j);
-				goalindexI = i;
-				goalindexJ = j;
+	char buf[MAX_MAZE_SIZE];
+
+	fgets(buf, MAX_MAZE_SIZE, file);
+	sscanf(buf, "%d", &g_maze.size);
+
+	for (int j = 0; j < g_maze.size; j++) {
+		fgets(buf, MAX_MAZE_SIZE, file);
+		for (int i = 0; i < g_maze.size; i++) {
+			g_maze.cells[i][j] = buf[i];
+
+			if (g_maze.cells[i][j] == 'C') {
+				g_camera.position = GetPositionFromIndex(i, j);
+			}
+			if (g_maze.cells[i][j] == 'G') {
+				g_maze.goalPosition = GetPositionFromIndex(i, j);
+				g_maze.goalIndexI = i;
+				g_maze.goalIndexJ = j;
 			}
 		}
 	}
 	fclose(file);
 }
 
-void DrawMaze()
-{
-	for (int j = 0; j < MazeSize; j++)
-		for (int i = 0; i < MazeSize; i++)
-			if (maze[i][j] == '*')
-			{
-				vec3 color = vec3(i / (float)MazeSize, j / (float)MazeSize, 1);
-				mat4 ModelMat = Translate(getPositionFromIndex(i, j));
-				glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
-				glUniform4f(uColor, color.x, color.y, color.z, 1);
-				cube.Draw(program);
+// ============================================================================
+// Drawing Helper Functions
+// ============================================================================
+void DrawCubeWithTransform(const mat4& modelMatrix, const vec4& color) {
+	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * modelMatrix);
+	glUniform4f(uColor, color.x, color.y, color.z, color.w);
+	cube.Draw(program);
+}
+
+void DrawMaze() {
+	for (int j = 0; j < g_maze.size; j++) {
+		for (int i = 0; i < g_maze.size; i++) {
+			if (g_maze.cells[i][j] == '*') {
+				vec3 color = vec3(
+					i / (float)g_maze.size,
+					j / (float)g_maze.size,
+					1.0f
+				);
+				mat4 modelMat = Translate(GetPositionFromIndex(i, j));
+				DrawCubeWithTransform(modelMat, vec4(color, 1.0f));
 			}
-}
-
-void myInit()
-{
-	LoadMaze();
-	cube.Init();
-	program = InitShader("vshader.glsl", "fshader.glsl");
-
-}
-
-void DrawGrid()
-{
-	float n = 40;
-	float w = MazeSize;
-	float h = MazeSize;
-
-	for (int i = 0; i < n; i++)
-	{
-		mat4 m = Translate(0, -0.5, -h / 2 + h / n * i) * Scale(w, 0.02, 0.02);
-		glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * m);
-		glUniform4f(uColor, 1, 1, 1, 1);
-		cube.Draw(program);
-	}
-	for (int i = 0; i < n; i++)
-	{
-		mat4 m = Translate(-w / 2 + w / n * i, -0.5, 0) * Scale(0.02, 0.02, h);
-		glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * m);
-		glUniform4f(uColor, 1, 1, 1, 1);
-		cube.Draw(program);
+		}
 	}
 }
 
+void DrawGrid() {
+	const float w = g_maze.size;
+	const float h = g_maze.size;
 
-void drawCamera()
-{
-	mat4 ModelMat = Translate(cameraPos) * RotateY(-cameraYaw * 180 / 3.141592) * Scale(vec3(cameraSize));
-	glUseProgram(program);
-	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
-	glUniform4f(uColor, 0, 1, 0, 1);
-	cube.Draw(program);
+	// Horizontal lines
+	for (int i = 0; i < GRID_LINE_COUNT; i++) {
+		mat4 m = Translate(0, -0.5, -h / 2 + h / GRID_LINE_COUNT * i)
+			* Scale(w, 0.02, 0.02);
+		DrawCubeWithTransform(m, vec4(1, 1, 1, 1));
+	}
 
-	ModelMat = Translate(cameraPos + viewDirection * cameraSize / 2) * RotateY(-cameraYaw * 180 / 3.141592) * Scale(vec3(cameraSize / 2));
-	glUseProgram(program);
-	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
-	glUniform4f(uColor, 0, 1, 0, 1);
-	cube.Draw(program);
+	// Vertical lines
+	for (int i = 0; i < GRID_LINE_COUNT; i++) {
+		mat4 m = Translate(-w / 2 + w / GRID_LINE_COUNT * i, -0.5, 0)
+			* Scale(0.02, 0.02, h);
+		DrawCubeWithTransform(m, vec4(1, 1, 1, 1));
+	}
 }
 
-void drawGoal()
-{
-	glUseProgram(program);
-	float GoalSize = 0.7;
+void DrawCamera() {
+	// Camera body
+	mat4 bodyMat = Translate(g_camera.position)
+		* RotateY(-g_camera.yaw * 180 / PI)
+		* Scale(vec3(g_camera.size));
+	DrawCubeWithTransform(bodyMat, vec4(0, 1, 0, 1));
 
-	mat4 ModelMat = Translate(goalPos) * RotateY(g_time * 180) * Scale(vec3(GoalSize));
-	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
-	glUniform4f(uColor, 0, 0, 0, 0);
-	cube.Draw(program);
-
-	ModelMat = Translate(goalPos) * RotateY(g_time * 180 + 45) * Scale(vec3(GoalSize));
-	glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * ModelMat);
-	glUniform4f(uColor, 0, 0, 0, 0);
-	cube.Draw(program);
+	// Camera head (direction indicator)
+	mat4 headMat = Translate(g_camera.position + g_camera.viewDirection * g_camera.size / 2)
+		* RotateY(-g_camera.yaw * 180 / PI)
+		* Scale(vec3(g_camera.size / 2));
+	DrawCubeWithTransform(headMat, vec4(0, 1, 0, 1));
 }
 
-void drawTrace(bool bDrawTrace = true) {
-	glUseProgram(program);
+void DrawGoal() {
+	const vec4 goalColor = vec4(0, 0, 0, 0);
 
-	for (int k = 0; k + 1 < (int)g_pathCells.size(); ++k)
-	{
-		int i0 = g_pathCells[k].first;
-		int j0 = g_pathCells[k].second;
-		int i1 = g_pathCells[k + 1].first;
-		int j1 = g_pathCells[k + 1].second;
+	// First cube
+	mat4 model1 = Translate(g_maze.goalPosition)
+		* RotateY(g_time * 180)
+		* Scale(vec3(GOAL_SIZE));
+	DrawCubeWithTransform(model1, goalColor);
 
-		vec3 p0 = getPositionFromIndex(i0, j0);
-		vec3 p1 = getPositionFromIndex(i1, j1);
+	// Second cube (45 degrees rotated)
+	mat4 model2 = Translate(g_maze.goalPosition)
+		* RotateY(g_time * 180 + 45)
+		* Scale(vec3(GOAL_SIZE));
+	DrawCubeWithTransform(model2, goalColor);
+}
+
+void DrawTrace() {
+	const vec4 traceColor = vec4(1, 0, 0, 1);
+
+	for (int k = 0; k + 1 < (int)g_pathState.pathCells.size(); ++k) {
+		int i0 = g_pathState.pathCells[k].first;
+		int j0 = g_pathState.pathCells[k].second;
+		int i1 = g_pathState.pathCells[k + 1].first;
+		int j1 = g_pathState.pathCells[k + 1].second;
+
+		vec3 p0 = GetPositionFromIndex(i0, j0);
+		vec3 p1 = GetPositionFromIndex(i1, j1);
 
 		vec3 mid = (p0 + p1) * 0.5f;
 		float len = length(p1 - p0);
@@ -182,81 +273,37 @@ void drawTrace(bool bDrawTrace = true) {
 			m = Translate(mid.x, -0.49f, mid.z) * Scale(len, 0.02f, 0.1f);
 		}
 
-		glUniformMatrix4fv(uMat, 1, GL_TRUE, g_Mat * m);
-		glUniform4f(uColor, 1, 0, 0, 1); // 빨간색
-		cube.Draw(program);
+		DrawCubeWithTransform(m, traceColor);
 	}
 }
 
-bool bDrawTrace = false;
-
-void drawScene(bool bDrawCamera = true)
-{
+void DrawScene(bool bDrawCamera = true) {
 	glUseProgram(program);
 	uMat = glGetUniformLocation(program, "uMat");
 	uColor = glGetUniformLocation(program, "uColor");
 
 	DrawGrid();
 	DrawMaze();
-	drawGoal();
+	DrawGoal();
 
 	if (bDrawCamera)
-		drawCamera();
+		DrawCamera();
 	if (bDrawTrace)
-		drawTrace();
+		DrawTrace();
 }
 
-void display()
-{
-	glEnable(GL_DEPTH_TEST);
+// ============================================================================
+// Pathfinding (A* Algorithm)
+// ============================================================================
+bool FindPathAStar(int startI, int startJ) {
+	static int gCost[MAX_MAZE_SIZE][MAX_MAZE_SIZE];
+	static bool closed[MAX_MAZE_SIZE][MAX_MAZE_SIZE];
+	static pair<int, int> parentCell[MAX_MAZE_SIZE][MAX_MAZE_SIZE];
 
-	float vWidth = wWidth / 2;
-	float vHeight = wHeight;
-
-	// LEFT SCREEN : View From Camera (Perspective Projection)
-	glViewport(0, 0, vWidth, vHeight);
-	glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-
-	float h = 4;
-	float aspectRatio = vWidth / vHeight;
-	float w = aspectRatio * h;
-	mat4 ViewMat = myLookAt(cameraPos, cameraPos + viewDirection, vec3(0, 1, 0));
-	mat4 ProjMat = myPerspective(45, aspectRatio, 0.01, 20);
-
-	g_Mat = ProjMat * ViewMat;
-	drawScene(false);							// drawing scene except the camera
-
-
-	// RIGHT SCREEN : View from above (Orthographic parallel projection)
-	glViewport(vWidth, 0, vWidth, vHeight);
-	h = MazeSize;
-	w = aspectRatio * h;
-	ViewMat = myLookAt(vec3(0, 5, 0), vec3(0, 0, 0), vec3(0, 0, -1));
-	ProjMat = myOrtho(-w / 2, w / 2, -h / 2, h / 2, 0, 20);
-
-	g_Mat = ProjMat * ViewMat;
-	drawScene(true);
-
-
-	glutSwapBuffers();
-}
-
-inline int Heuristic(int i, int j)
-{
-	return abs(i - goalindexI) + abs(j - goalindexJ);
-}
-
-bool FindPathAStar(int si, int sj)
-{
-	const int INF = 1e9;
-	static int gCost[255][255];
-	static bool closed[255][255];
-	static pair<int, int> parentCell[255][255];
-
-	// 초기화
-	for (int i = 0; i < MazeSize; i++) {
-		for (int j = 0; j < MazeSize; j++) {
-			gCost[i][j] = INF;
+	// Initialize
+	for (int i = 0; i < g_maze.size; i++) {
+		for (int j = 0; j < g_maze.size; j++) {
+			gCost[i][j] = PATHFINDING_INFINITY;
 			closed[i][j] = false;
 		}
 	}
@@ -272,55 +319,57 @@ bool FindPathAStar(int si, int sj)
 		}
 	};
 
-	priority_queue<Node, vector<Node>, Compare> Navigator;
+	priority_queue<Node, vector<Node>, Compare> openSet;
 
-	gCost[si][sj] = 0;
-	Navigator.push({ si, sj, 0, Heuristic(si, sj) });
+	gCost[startI][startJ] = 0;
+	openSet.push({ startI, startJ, 0, CalculateHeuristic(startI, startJ) });
 
-	int di[4] = { 1, -1, 0, 0 };
-	int dj[4] = { 0, 0, 1, -1 };
+	const int di[4] = { 1, -1, 0, 0 };
+	const int dj[4] = { 0, 0, 1, -1 };
 
-	while (!Navigator.empty()) {
-		Node cur = Navigator.top();
-		Navigator.pop();
+	while (!openSet.empty()) {
+		Node current = openSet.top();
+		openSet.pop();
 
-		int i = cur.i, j = cur.j;
+		int i = current.i, j = current.j;
 		if (closed[i][j]) continue;
 		closed[i][j] = true;
 
-		// 목표 도착
-		if (i == goalindexI && j == goalindexJ) {
-			g_pathCells.clear();
+		// Goal reached
+		if (i == g_maze.goalIndexI && j == g_maze.goalIndexJ) {
+			g_pathState.pathCells.clear();
 			int ci = i, cj = j;
 
-			while (!(ci == si && cj == sj)) {
-				g_pathCells.push_back({ ci, cj });
+			while (!(ci == startI && cj == startJ)) {
+				g_pathState.pathCells.push_back({ ci, cj });
 				auto p = parentCell[ci][cj];
 				ci = p.first;
 				cj = p.second;
 			}
-			g_pathCells.push_back({ si, sj });
-			reverse(g_pathCells.begin(), g_pathCells.end());
+			g_pathState.pathCells.push_back({ startI, startJ });
+			reverse(g_pathState.pathCells.begin(), g_pathState.pathCells.end());
 
 			return true;
 		}
 
-		// 이웃 탐색
+		// Explore neighbors
 		for (int k = 0; k < 4; k++) {
 			int ni = i + di[k];
 			int nj = j + dj[k];
 
-			// 범위 및 벽 체크
-			if (ni < 0 || ni >= MazeSize || nj < 0 || nj >= MazeSize) continue;
-			if (maze[ni][nj] == '*') continue;
+			// Boundary and wall check
+			if (ni < 0 || ni >= g_maze.size || nj < 0 || nj >= g_maze.size)
+				continue;
+			if (g_maze.cells[ni][nj] == '*')
+				continue;
 
 			int newG = gCost[i][j] + 1;
 			if (newG < gCost[ni][nj]) {
 				gCost[ni][nj] = newG;
 				parentCell[ni][nj] = { i, j };
 
-				int newF = newG + Heuristic(ni, nj);
-				Navigator.push({ ni, nj, newG, newF });
+				int newF = newG + CalculateHeuristic(ni, nj);
+				openSet.push({ ni, nj, newG, newF });
 			}
 		}
 	}
@@ -328,63 +377,28 @@ bool FindPathAStar(int si, int sj)
 	return false;
 }
 
-
-bool WorldPosToIndex(const vec3& pos, int& outI, int& outJ)
-{
-	float unit = 1.0f;
-
-	float left = -MazeSize / 2.0f + unit / 2.0f;
-
-	float fx = (pos.x - left) / unit;
-	float fz = (pos.z - left) / unit;
-
-	int i = (int)roundf(fx);
-	int j = (int)roundf(fz);
-
-	if (i < 0 || i >= MazeSize || j < 0 || j >= MazeSize)
-		return false; // 미로 밖
-
-	outI = i;
-	outJ = j;
-	return true;
-}
-
-bool IsWallAtWorldPos(const vec3& pos)
-{
-	int i, j;
-	if (!WorldPosToIndex(pos, i, j))
-		return true;        // 밖은 막힌 걸로 취급
-
-	return (maze[i][j] == '*');
-}
-
-
-bool CanMoveCameraTo(const vec3& tryPos, const vec3& viewDirection, bool isForward)
-{
-	// forward / right 벡터 만들기
+// ============================================================================
+// Camera Movement
+// ============================================================================
+bool CanMoveCameraTo(const vec3& tryPos, const vec3& viewDirection, bool isForward) {
 	vec3 forward = vec3(viewDirection.x, 0.0f, viewDirection.z);
 	if (length(forward) < 1e-5f)
 		forward = vec3(0, 0, -1);
 
 	forward = normalize(forward);
-
 	vec3 right = normalize(vec3(forward.z, 0.0f, -forward.x));
 
-	float bodyHalf = cameraSize * 0.5f;
-	float headHalf = cameraSize * 0.25f;
+	const float bodyHalf = g_camera.size * 0.5f;
+	const float headHalf = g_camera.size * 0.25f;
 
-	vec3 headCenter = tryPos + forward * (bodyHalf + headHalf);
 	vec3 pts[6];
-
-	// 몸통 4점 
 	pts[0] = tryPos - right * bodyHalf - forward * bodyHalf;
 	pts[1] = tryPos - right * bodyHalf + forward * bodyHalf;
 	pts[2] = tryPos + right * bodyHalf + forward * bodyHalf;
 	pts[3] = tryPos + right * bodyHalf - forward * bodyHalf;
 
 	if (isForward) {
-		// 앞으로 갈 때: 앞쪽 4점만 체크
-		int idxs[4] = { 1, 2, 4, 5 };
+		const int idxs[4] = { 1, 2, 4, 5 };
 		for (int n = 0; n < 4; ++n) {
 			int k = idxs[n];
 			if (IsWallAtWorldPos(pts[k])) {
@@ -393,8 +407,7 @@ bool CanMoveCameraTo(const vec3& tryPos, const vec3& viewDirection, bool isForwa
 		}
 	}
 	else {
-		// 뒤로 갈 때: 뒤쪽 2점만 체크
-		int idxs[2] = { 0, 3 };
+		const int idxs[2] = { 0, 3 };
 		for (int n = 0; n < 2; ++n) {
 			int k = idxs[n];
 			if (IsWallAtWorldPos(pts[k])) {
@@ -406,170 +419,225 @@ bool CanMoveCameraTo(const vec3& tryPos, const vec3& viewDirection, bool isForwa
 	return true;
 }
 
-bool g_followPath = false;	// 경로 따라가는 중인지
-int  g_followIndex = 0;		// g_pathCells에서 현재 몇 번째까지 왔는지
-int  g_followState = 0;		// 0 = 회전 중, 1 = 직선 이동 중
+void UpdateCameraViewDirection() {
+	g_camera.viewDirection = normalize(vec3(
+		sinf(g_camera.yaw),
+		0.0f,
+		-cosf(g_camera.yaw)
+	));
+}
 
-void AutoMoveCameraAlongPath(float dt)
-{
-	const float FOLLOW_POS_EPS = 0.01f; // 위치 오차 허용
-	const float FOLLOW_ANG_EPS = 0.03f; // 각도 오차 허용
+void HandleManualMovement(float dt) {
+	// Rotation with A/D keys
+	if ((GetAsyncKeyState('A') & 0x8000) == 0x8000)
+		g_camera.yaw -= rotateSpeed * dt;
+	if ((GetAsyncKeyState('D') & 0x8000) == 0x8000)
+		g_camera.yaw += rotateSpeed * dt;
 
-	// 마지막 지점까지 도달했으면 종료
-	if (g_followIndex >= (int)g_pathCells.size() - 1) {
-		g_followPath = false;
+	UpdateCameraViewDirection();
+
+	// Forward movement with W key
+	if ((GetAsyncKeyState('W') & 0x8000) == 0x8000) {
+		vec3 tryPos = g_camera.position + g_camera.speed * dt * g_camera.viewDirection;
+		if (CanMoveCameraTo(tryPos, g_camera.viewDirection, true))
+			g_camera.position = tryPos;
+	}
+
+	// Backward movement with S key
+	if ((GetAsyncKeyState('S') & 0x8000) == 0x8000) {
+		vec3 tryPos = g_camera.position - g_camera.speed * dt * g_camera.viewDirection;
+		if (CanMoveCameraTo(tryPos, g_camera.viewDirection, false))
+			g_camera.position = tryPos;
+	}
+}
+
+void AutoMoveCameraAlongPath(float dt) {
+	const float FOLLOW_POS_EPS = 0.01f;
+	const float FOLLOW_ANG_EPS = 0.03f;
+
+	// Check if reached the end
+	if (g_pathState.currentIndex >= (int)g_pathState.pathCells.size() - 1) {
+		g_pathState.isFollowingPath = false;
 		return;
 	}
 
-	// 다음 목표 셀
-	auto curCell = g_pathCells[g_followIndex];
-	auto nextCell = g_pathCells[g_followIndex + 1];
-	vec3 pCur = getPositionFromIndex(curCell.first, curCell.second);
-	vec3 pNext = getPositionFromIndex(nextCell.first, nextCell.second);
+	// Get current and next cell
+	auto currentCell = g_pathState.pathCells[g_pathState.currentIndex];
+	auto nextCell = g_pathState.pathCells[g_pathState.currentIndex + 1];
+	vec3 pCurrent = GetPositionFromIndex(currentCell.first, currentCell.second);
+	vec3 pNext = GetPositionFromIndex(nextCell.first, nextCell.second);
 
-	vec3 desiredDir = pNext - pCur;
+	vec3 desiredDir = pNext - pCurrent;
 	desiredDir.y = 0.0f;
-	float segLen = length(desiredDir);
-	if (segLen < 1e-5f) {
-		// 셀 좌표가 이상하면 그냥 다음으로
-		g_followIndex++;
+	float segmentLength = length(desiredDir);
+
+	if (segmentLength < 1e-5f) {
+		g_pathState.currentIndex++;
 		return;
 	}
-	desiredDir /= segLen;
+	desiredDir /= segmentLength;
 
 	float targetYaw = atan2f(desiredDir.x, -desiredDir.z);
 
-	// 상태 0: 회전 중
-	if (g_followState == 0) {
+	// State 0: Rotating
+	if (g_pathState.movementState == 0) {
+		float delta = targetYaw - g_camera.yaw;
 
-		// 최단 회전 방향으로 보정
-		float delta = targetYaw - cameraYaw;
-		const float PI = 3.141592f;
-		while (delta > PI) delta -= 2.0f * 2.0f * PI * 0.5f;
-		while (delta < -PI) delta += 2.0f * 2.0f * PI * 0.5f;
+		// Normalize angle difference
+		while (delta > PI) delta -= 2.0f * PI;
+		while (delta < -PI) delta += 2.0f * PI;
 
 		if (fabs(delta) < FOLLOW_ANG_EPS) {
-			cameraYaw = targetYaw;
-			viewDirection = normalize(vec3(sinf(cameraYaw), 0.0f, -cosf(cameraYaw)));
-			cameraPos = pCur;
-			g_followState = 1; // 직선 이동으로 전환
+			g_camera.yaw = targetYaw;
+			UpdateCameraViewDirection();
+			g_camera.position = pCurrent;
+			g_pathState.movementState = 1;
 		}
 		else {
 			float step = rotateSpeed * dt;
-			//if (fabs(delta) < step) step = fabs(delta); // overshoot 방지
-			cameraYaw += (delta > 0 ? step : -step);
-			viewDirection = normalize(vec3(sinf(cameraYaw), 0.0f, -cosf(cameraYaw)));
+			g_camera.yaw += (delta > 0 ? step : -step);
+			UpdateCameraViewDirection();
 		}
-
 		return;
 	}
 
-	// 상태 1: 직선 이동 중
-	if (g_followState == 1) {
+	// State 1: Moving
+	if (g_pathState.movementState == 1) {
+		vec3 moveDir = normalize(vec3(g_camera.viewDirection.x, 0.0f, g_camera.viewDirection.z));
+		vec3 tryPos = g_camera.position + moveDir * dt * g_camera.speed;
+		vec3 fromCurrent = tryPos - pCurrent;
+		float progress = dot(fromCurrent, desiredDir);
 
-		vec3 moveDir = normalize(vec3(viewDirection.x, 0.0f, viewDirection.z));
-		vec3 tryPos = cameraPos + moveDir * dt * cameraSpeed;
-		vec3 fromCur = tryPos - pCur;
-		float prog = dot(fromCur, desiredDir);
-
-		if (prog >= segLen) {
-			cameraPos = pNext;
-			g_followIndex++;
-			g_followState = 0; // 회전 상태로 전환
+		if (progress >= segmentLength) {
+			g_camera.position = pNext;
+			g_pathState.currentIndex++;
+			g_pathState.movementState = 0;
 		}
 		else {
-			cameraPos = tryPos;
+			g_camera.position = tryPos;
 		}
 	}
 }
 
-bool g_prevQDown = false;
-bool g_prevSpaceDown = false;
+// ============================================================================
+// Input Handling
+// ============================================================================
+void HandlePathfindingToggle() {
+	static bool prevQDown = false;
+	bool qDown = (GetAsyncKeyState('Q') & 0x8000) != 0;
 
-void idle()
-{
-	float dt = 0.016f;
-	g_time += dt;
-	if (g_followPath) {										// 자동 이동 중
-		AutoMoveCameraAlongPath(dt);
-	}
-	else {
-		if ((GetAsyncKeyState('A') & 0x8000) == 0x8000)		// 왼쪽으로 회전
-			cameraYaw -= rotateSpeed * dt;
-		if ((GetAsyncKeyState('D') & 0x8000) == 0x8000)		// 오른쪽으로 회전
-			cameraYaw += rotateSpeed * dt;
-		viewDirection = normalize(vec3(sinf(cameraYaw), 0.0f, -cosf(cameraYaw)));
-
-		if ((GetAsyncKeyState('W') & 0x8000) == 0x8000) {	// 카메라 보는 방향으로 이동
-			vec3 tryPos = cameraPos + cameraSpeed * dt * viewDirection;
-			if (CanMoveCameraTo(tryPos, viewDirection, true))
-				cameraPos = tryPos;
-		}
-		if ((GetAsyncKeyState('S') & 0x8000) == 0x8000) {	// 카메라 보는 방향의 반대 방향으로 이동
-			vec3 tryPos = cameraPos - cameraSpeed * dt * viewDirection;
-			if (CanMoveCameraTo(tryPos, viewDirection, false))
-				cameraPos = tryPos;
-		}
-	}
-	bool qDown = (GetAsyncKeyState('Q') & 0x8000) != 0; // Q 키를 눌렀을 때 경로 탐색 시작/종료
-	if (qDown && !g_prevQDown) {						// Q 키가 새로 눌린 경우
+	if (qDown && !prevQDown) {
 		int si, sj;
-		if (WorldPosToIndex(cameraPos, si, sj)) {
+		if (WorldPosToIndex(g_camera.position, si, sj)) {
 			bDrawTrace = !bDrawTrace;
 			FindPathAStar(si, sj);
-			/*if (bDrawTrace) {
-				if (FindPathAStar(si, sj))
-					printf("Path found.\n");
-				else
-					printf("Not found.\n");
-			}*/
 		}
 	}
-	g_prevQDown = qDown;								// 이전 프레임의 Q 키 상태 저장
-	bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
-	if (spaceDown && !g_prevSpaceDown) {
+	prevQDown = qDown;
+}
 
+void HandleAutoMovementToggle() {
+	static bool prevSpaceDown = false;
+	bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+
+	if (spaceDown && !prevSpaceDown) {
 		int si, sj;
-		if (WorldPosToIndex(cameraPos, si, sj)) {
+		if (WorldPosToIndex(g_camera.position, si, sj)) {
 			if (FindPathAStar(si, sj)) {
-				g_followPath = !g_followPath;	// 자동 이동 시작
-				g_followIndex = 0;
-				g_followState = 0;
+				g_pathState.isFollowingPath = !g_pathState.isFollowingPath;
+				g_pathState.currentIndex = 0;
+				g_pathState.movementState = 0;
 			}
 			else {
-				g_followPath = false;
+				g_pathState.isFollowingPath = false;
 			}
 		}
 	}
-	g_prevSpaceDown = spaceDown;
+	prevSpaceDown = spaceDown;
+}
 
+// ============================================================================
+// Main Loop Functions
+// ============================================================================
+void myInit() {
+	LoadMaze();
+	cube.Init();
+	program = InitShader("vshader.glsl", "fshader.glsl");
+}
 
-	Sleep(16);											// for vSync
+void display() {
+	glEnable(GL_DEPTH_TEST);
+
+	const float vWidth = wWidth / 2;
+	const float vHeight = wHeight;
+
+	// LEFT SCREEN: First-person view (Perspective)
+	glViewport(0, 0, vWidth, vHeight);
+	glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+	float aspectRatio = vWidth / vHeight;
+	mat4 viewMat = myLookAt(
+		g_camera.position,
+		g_camera.position + g_camera.viewDirection,
+		vec3(0, 1, 0)
+	);
+	mat4 projMat = myPerspective(45, aspectRatio, 0.01, 20);
+
+	g_Mat = projMat * viewMat;
+	DrawScene(false);
+
+	// RIGHT SCREEN: Top-down view (Orthographic)
+	glViewport(vWidth, 0, vWidth, vHeight);
+
+	float h = g_maze.size;
+	float w = aspectRatio * h;
+	viewMat = myLookAt(vec3(0, 5, 0), vec3(0, 0, 0), vec3(0, 0, -1));
+	projMat = myOrtho(-w / 2, w / 2, -h / 2, h / 2, 0, 20);
+
+	g_Mat = projMat * viewMat;
+	DrawScene(true);
+
+	glutSwapBuffers();
+}
+
+void idle() {
+	g_time += FIXED_DELTA_TIME;
+
+	if (g_pathState.isFollowingPath) {
+		AutoMoveCameraAlongPath(FIXED_DELTA_TIME);
+	}
+	else {
+		HandleManualMovement(FIXED_DELTA_TIME);
+	}
+
+	HandlePathfindingToggle();
+	HandleAutoMovementToggle();
+
+	Sleep(FRAME_DELAY_MS);
 	glutPostRedisplay();
 }
 
-void reshape(int wx, int wy)
-{
+void reshape(int wx, int wy) {
 	printf("%d %d \n", wx, wy);
 	wWidth = wx;
 	wHeight = wy;
 	glutPostRedisplay();
 }
 
-
-int main(int argc, char** argv)
-{
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+int main(int argc, char** argv) {
 	glutInit(&argc, argv);
-
 	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
 	glutInitWindowSize(wWidth, wHeight);
-
 	glutCreateWindow("Homework3 (Maze Navigator)");
 
 	glewExperimental = true;
 	glewInit();
 
-	printf("OpenGL %s, GLSL %s\n", glGetString(GL_VERSION),
+	printf("OpenGL %s, GLSL %s\n",
+		glGetString(GL_VERSION),
 		glGetString(GL_SHADING_LANGUAGE_VERSION));
 
 	myInit();
